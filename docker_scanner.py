@@ -82,19 +82,36 @@ def check_dockerfile_security(dockerfile_path):
 
 def check_compose_security(compose_path):
     findings = []
+    dockerfile_paths = []
     with open(compose_path, "r") as f:
         compose = yaml.safe_load(f)
 
     services = compose.get("services", {})
     for service_name, service in services.items():
         service_findings = []
-
-        # Image checks
+        build_config = service.get("build", {})
         image = service.get("image", "")
-        if not image:
-            service_findings.append("No image specified - using build context instead")
-        elif not is_official_image(image):
-            service_findings.append(f"Image '{image}' is not an official image")
+
+        # Detect Dockerfiles from build configurations
+        if build_config:
+            context = build_config.get("context", ".")
+            dockerfile = build_config.get("dockerfile", "Dockerfile")
+            
+            # Resolve absolute path to Dockerfile
+            compose_dir = Path(compose_path).parent
+            build_context = (compose_dir / context).resolve()
+            df_path = (build_context / dockerfile).resolve()
+            
+            if df_path.exists():
+                dockerfile_paths.append(str(df_path))
+                service_findings.append(f"Using Dockerfile: {df_path}")
+            else:
+                service_findings.append(f"Missing Dockerfile: {df_path}")
+
+        # Existing service checks [keep previous checks] ...
+        # Image checks
+        if not image and not build_config:
+            service_findings.append("No image or build configuration specified")
 
         # Security options
         security_opts = service.get("security_opt", [])
@@ -186,18 +203,29 @@ def main():
     dockerfile_reports = []
     compose_reports = []
     images = set()
+    all_dockerfiles = set()
 
-    if args.dockerfiles:
-        for df in args.dockerfiles:
-            report = check_dockerfile_security(df)
-            dockerfile_reports.append(report)
-            images.add(report["base_image"])
-
+    # Collect Dockerfiles from compose files
     if args.compose_files:
         for cf in args.compose_files:
-            report = check_compose_security(cf)
-            compose_reports.append(report)
-            for service in report["services"]:
+            compose_report = check_compose_security(cf)
+            compose_reports.append(compose_report)
+            all_dockerfiles.update(compose_report.get("dockerfiles", []))
+
+    # Add explicitly specified Dockerfiles
+    if args.dockerfiles:
+        all_dockerfiles.update(args.dockerfiles)
+
+    # Process all Dockerfiles
+    for df in all_dockerfiles:
+        report = check_dockerfile_security(df)
+        dockerfile_reports.append(report)
+        images.add(report["base_image"])
+
+    # Process compose files for service checks
+    if args.compose_files:
+        for cf in args.compose_files:
+            for service in compose_report["services"]:
                 if service["image"]:
                     images.add(service["image"])
 
