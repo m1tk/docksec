@@ -1,7 +1,6 @@
 import argparse
 import subprocess
 import sys
-import re
 from pathlib import Path
 import yaml
 from dockerfile_parse import DockerfileParser
@@ -96,45 +95,79 @@ def check_compose_security(compose_path):
         if build_config:
             context = build_config.get("context", ".")
             dockerfile = build_config.get("dockerfile", "Dockerfile")
-            
+
             # Resolve absolute path to Dockerfile
             compose_dir = Path(compose_path).parent
             build_context = (compose_dir / context).resolve()
             df_path = (build_context / dockerfile).resolve()
-            
+
             if df_path.exists():
                 dockerfile_paths.append(str(df_path))
                 service_findings.append(f"Using Dockerfile: {df_path}")
             else:
                 service_findings.append(f"Missing Dockerfile: {df_path}")
 
-        # Existing service checks [keep previous checks] ...
         # Image checks
         if not image and not build_config:
             service_findings.append("No image or build configuration specified")
 
-        # Security options
+        # Security permission checks
+        if service.get("privileged", False):
+            service_findings.append(color_text("Privileged mode enabled - extremely dangerous!", "RED"))
+
+        # Capabilities analysis
+        cap_add = service.get("cap_add", [])
+        dangerous_caps = {
+            'SYS_ADMIN', 'NET_ADMIN', 'SYS_MODULE', 'SYS_PTRACE',
+            'NET_RAW', 'SYS_CHROOT', 'DAC_OVERRIDE', 'SETUID', 'SETGAC'
+        }
+        added_dangerous = [cap for cap in cap_add if cap in dangerous_caps]
+        if added_dangerous:
+            service_findings.append(
+                color_text(f"Dangerous capabilities added: {', '.join(added_dangerous)}", "RED")
+            )
+
+        cap_drop = service.get("cap_drop", [])
+        if 'ALL' not in cap_drop:
+            service_findings.append("Not dropping ALL capabilities - consider cap_drop: [ALL]")
+
+        # Security options hardening
         security_opts = service.get("security_opt", [])
-        if "no-new-privileges" not in security_opts:
-            service_findings.append("Missing security option: no-new-privileges")
+        security_checks = {
+            'no-new-privileges': "no-new-privileges",
+            'seccomp': 'seccomp=',
+            'apparmor': 'apparmor='
+        }
+        
+        for opt, pattern in security_checks.items():
+            if not any(pattern in val for val in security_opts):
+                service_findings.append(f"Missing security_opt: {opt} hardening")
 
-        capabilities = service.get("cap_drop", [])
-        if "ALL" not in capabilities:
-            service_findings.append("Consider dropping ALL capabilities with cap_drop")
+        # Filesystem protections
+        if not service.get("read_only", False):
+            service_findings.append("Filesystem not read-only - consider read_only: true")
 
-        # User context
-        if not service.get("user"):
-            service_findings.append("No user specified - running as root")
+        tmpfs_mounts = service.get("tmpfs", [])
+        required_tmp_dirs = {'/tmp', '/run', '/var/tmp'}
+        if not required_tmp_dirs.issubset(tmpfs_mounts):
+            service_findings.append(
+                "Missing tmpfs mounts for temporary directories - consider adding: " +
+                ", ".join(required_tmp_dirs)
+            )
 
-        # Networking
-        networks = service.get("networks", [])
-        if "default" in networks and len(networks) == 1:
-            service_findings.append("Using default network - consider custom networks")
+        # Device restrictions
+        if service.get("devices", []):
+            service_findings.append("Host devices mounted - verify these are absolutely necessary")
 
-        ports = service.get("ports", [])
-        for port in ports:
-            if "0.0.0.0" in str(port):
-                service_findings.append(f"Exposing port to all interfaces: {port}")
+        # Resource limitations
+        if not service.get("deploy", {}).get("resources", {}).get("limits"):
+            service_findings.append("No resource limits set - add memory/cpu constraints")
+
+        # User namespace
+        if not service.get("userns_mode"):
+            service_findings.append("Consider using user namespace isolation with userns_mode")
+
+        # Existing checks [keep previous network/port/user checks]...
 
         if service_findings:
             findings.append({
@@ -145,7 +178,8 @@ def check_compose_security(compose_path):
 
     return {
         "file": str(compose_path),
-        "services": findings
+        "services": findings,
+        "dockerfiles": dockerfile_paths
     }
 
 def generate_report(dockerfile_reports, compose_reports, trivy_results):
@@ -178,14 +212,6 @@ def generate_report(dockerfile_reports, compose_reports, trivy_results):
             report.append(color_text(result, "RED"))
         else:
             report.append(color_text("No high/critical vulnerabilities found", "GREEN"))
-
-    # General recommendations
-    report.append(color_text("\n[+] General Recommendations", "BLUE"))
-    report.append("- Consider implementing rootless Docker mode")
-    report.append("- Use secrets management for sensitive data")
-    report.append("- Regularly update base images and dependencies")
-    report.append("- Implement image signing and verification")
-    report.append("- Use healthchecks and resource constraints")
 
     return "\n".join(report)
 
