@@ -38,10 +38,19 @@ def scan_image_with_trivy(image):
         return e.stdout or e.stderr
 
 def is_official_image(image):
+    clean_image = image.split("@")[0].split(":")[0]
+    parts = clean_image.split("/")
+    
+    # Check for custom registry
+    if any(c in parts[0] for c in [".", ":"]):
+        if parts[0] != "docker.io":
+            return False
+
     return (
-        not ("/" in image.split(":")[0]) or 
-        image.startswith("library/") or
-        image.startswith("docker.io/library/")
+        len(parts) == 1 or
+        parts[0] == "library" or
+        (len(parts) > 1 and parts[1] == "library") or
+        (len(parts) == 2 and parts[0] == "docker.io")
     )
 
 def check_dockerfile_security(dockerfile_path):
@@ -213,6 +222,9 @@ def check_compose_security(compose_path):
                 service_findings.append(f"Using Dockerfile: {df_path}")
             else:
                 service_findings.append(f"Missing Dockerfile: {df_path}")
+        elif image is not None and image != "":
+            if not is_official_image(image):
+                findings.append(f"Image '{image}' is not an official image")
 
         # Image checks
         if not image and not build_config:
