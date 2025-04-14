@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import yaml
 from dockerfile_parse import DockerfileParser
+import re
 
 # ANSI color codes
 COLORS = {
@@ -59,10 +60,48 @@ def check_dockerfile_security(dockerfile_path):
         findings.append("No non-root user specified - consider adding USER instruction")
 
     # Check package installations
+    package_managers = [
+        "apt-get install",
+        "apk add",
+        "yum install",
+        "dnf install",
+        "zypper install",
+        "pip install",
+        "pip3 install",
+        "npm install",
+        "gem install",
+        "bundle install",
+        "cargo install",
+        "go get",
+        "dotnet add",
+        "pacman -S",
+        "apk add --no-cache",
+        "apt-get install -y",
+        "python -m pip install",
+        "poetry add"
+    ]
+
     run_commands = [cmd["value"] for cmd in dfp.structure if cmd["instruction"] == "RUN"]
+    detected_pms = set()
+    packages_installed = []
+    
     for cmd in run_commands:
-        if any(pkg in cmd for pkg in ["apt-get install", "apk add", "yum install"]):
-            findings.append("Potential unnecessary packages installed - review installed packages")
+        for pm in package_managers:
+            if pm in cmd:
+                pm_name = pm.split()[0].upper()
+                detected_pms.add(pm_name)
+                
+                # Attempt to extract package names
+                packages = re.findall(rf"{pm} (.*?)(?:\\|\n|$)", cmd)
+                if packages:
+                    packages_installed.extend(packages[0].split())
+
+    if detected_pms:
+        pm_list = ", ".join(detected_pms)
+        findings.append(
+            color_text(f"Package installations detected via: {pm_list}", "YELLOW") + 
+            "\n    Installed packages: " + ", ".join(packages_installed)
+        )
 
     # Check security options
     security_options = {
