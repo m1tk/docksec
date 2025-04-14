@@ -125,6 +125,74 @@ def check_compose_security(compose_path):
         compose = yaml.safe_load(f)
 
     services = compose.get("services", {})
+    networks = compose.get("networks", {})
+
+    # Analyze network definitions
+    network_configs = {}
+    for net_name, net_config in networks.items():
+        config = {
+            'internal': net_config.get('internal', False),
+            'driver': net_config.get('driver', 'bridge'),
+            'ipam': net_config.get('ipam', {}),
+            'labels': net_config.get('labels', [])
+        }
+        network_configs[net_name] = config
+
+    for service_name, service in services.items():
+        service_findings = []
+        
+        # Network mode checks
+        net_mode = service.get("network_mode")
+        if net_mode == "host":
+            service_findings.append(
+                color_text("Host network mode used - breaks container isolation!", "RED")
+            )
+
+        # Port exposure analysis
+        ports = service.get("ports", [])
+        
+        for port in ports:
+            # Check for 0.0.0.0 exposure
+            if isinstance(port, str) and "0.0.0.0" in port:
+                service_findings.append(
+                    f"Exposing port {port} to all interfaces - "
+                    "consider binding to 127.0.0.1 instead"
+                )
+
+        # Network membership checks
+        service_networks = service.get("networks", [])
+        if not service_networks:
+            service_findings.append("Using default network - create dedicated networks")
+
+        for net_name in service_networks:
+            net_config = network_configs.get(net_name, {})
+            if not net_config.get('internal', False):
+                service_findings.append(
+                    f"Network '{net_name}' not marked as internal - "
+                    "external access possible"
+                )
+
+        # Inter-service communication analysis
+        depends_on = service.get("depends_on", [])
+        if len(depends_on) > 0 and not service.get("links"):
+            service_findings.append(
+                "Service dependencies without explicit links - "
+                "consider network segmentation"
+            )
+
+        # DNS and network security
+        if service.get("dns", None):
+            service_findings.append(
+                "Custom DNS configured - verify DNSSEC settings"
+            )
+
+        # Network policy checks
+        if "default" in service_networks and len(service_networks) == 1:
+            service_findings.append(
+                "Using default network without isolation - "
+                "create service-specific networks"
+            )
+    
     for service_name, service in services.items():
         service_findings = []
         build_config = service.get("build", {})
@@ -206,14 +274,21 @@ def check_compose_security(compose_path):
         if not service.get("userns_mode"):
             service_findings.append("Consider using user namespace isolation with userns_mode")
 
-        # Existing checks [keep previous network/port/user checks]...
-
         if service_findings:
             findings.append({
                 "service": service_name,
                 "findings": service_findings,
-                "image": image
+                "image": service.get("image", "")
             })
+
+    # Network architecture checks
+    if not any(net.get('internal', False) for net in networks.values()):
+        findings.append({
+            "service": "Global",
+            "findings": [color_text("No internal networks defined - "
+                                  "critical services might be exposed", "RED")],
+            "image": ""
+        })
 
     return {
         "file": str(compose_path),
