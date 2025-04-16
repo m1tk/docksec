@@ -33,9 +33,9 @@ def scan_image_with_trivy(image):
             text=True,
             check=True
         )
-        return result.stdout
+        return (False, result.stdout)
     except subprocess.CalledProcessError as e:
-        return e.stdout or e.stderr
+        return (True, e.stdout or e.stderr)
 
 def is_official_image(image):
     clean_image = image.split("@")[0].split(":")[0]
@@ -383,12 +383,18 @@ def main():
 
     # Run vulnerability scans
     trivy_results = {}
+    vulns_found   = False 
     for image in images:
         print(f"Scanning {image} with Trivy...")
-        trivy_results[image] = scan_image_with_trivy(image)
+        is_vuln, trivy_results[image] = scan_image_with_trivy(image)
+        if is_vuln:
+            vulns_found = True
 
     # Generate final report
     print(generate_report(dockerfile_reports, compose_reports, trivy_results))
+
+    if vulns_found or len(dockerfile_reports) > 0 or len(compose_reports) > 0:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
